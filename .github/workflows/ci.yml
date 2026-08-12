@@ -22,7 +22,7 @@ jobs:
 
       # go.mod é a fonte única da versão do Go. O Dockerfile fixa a sua própria e mais
       # nova; as duas são compatíveis porque a diretiva do módulo é um piso.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
