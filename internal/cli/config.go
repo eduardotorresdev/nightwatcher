@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
+	"os"
 	"slices"
 	"strings"
 
@@ -148,11 +150,20 @@ func runConfigValidate(cmd *cobra.Command, args []string) error {
 			return err
 		}
 
+		globalMCP, err := st.GlobalMCPServers(ctx)
+		if err != nil {
+			return err
+		}
+
 		checks := []check{
 			checkSentry(ctx, r, org, projects),
 			checkLinear(ctx, r, team),
 			checkGitHub(ctx, r, projects),
 		}
+		// One check per server rather than one for all of them: they are independent
+		// services, and "os MCPs falharam" would send whoever reads this looking at
+		// four servers when one is down.
+		checks = append(checks, checkMCPServers(ctx, globalMCP, projects)...)
 
 		fmt.Fprintln(out, "\nalcance")
 		rows := make([][]string, 0, len(checks))
@@ -309,4 +320,49 @@ func checkGitHub(ctx context.Context, r *remote, projects []domain.Project) chec
 	}
 	c.detail += fmt.Sprintf("%d repositório(s) alcançado(s)", len(projects))
 	return c
+}
+
+// checkMCPServers proves every registered MCP server, global and per Projeto, the same
+// way checkSentry proves every registered Fonte: what is validated is the whole
+// configuration, not a sample of it.
+//
+// It runs the direct probe only. The container probe belongs to `mcp add`, where a
+// human is waiting and can act on it; here it would raise one container per server on
+// every deploy, and `config validate` runs in a deploy script.
+func checkMCPServers(ctx context.Context, global []domain.MCPServer, projects []domain.Project) []check {
+	type scoped struct {
+		server domain.MCPServer
+		escopo string
+	}
+	var all []scoped
+	for _, m := range global {
+		all = append(all, scoped{server: m, escopo: "global"})
+	}
+	for _, p := range projects {
+		for _, m := range p.MCPServers {
+			all = append(all, scoped{server: m, escopo: p.Name})
+		}
+	}
+	if len(all) == 0 {
+		return nil
+	}
+
+	client := &http.Client{Timeout: mcpProbeTimeout}
+	out := make([]check, 0, len(all))
+	for _, s := range all {
+		c := check{name: "MCP " + s.server.Name + " (" + s.escopo + ")"}
+		res, err := probeMCP(ctx, client, s.server, os.Getenv)
+		switch {
+		case err != nil:
+			// Not explainProbe: that one prints the multi-line instructions `mcp add`
+			// gives a human at a terminal, and this lands in a one-line table cell.
+			c.err = err
+		case res.ServerName != "":
+			c.detail = res.ServerName + " " + res.ServerVersion
+		default:
+			c.detail = s.server.URL
+		}
+		out = append(out, c)
+	}
+	return out
 }

@@ -130,9 +130,10 @@ func TestProjectAddWithATerminalStillGuidesWhenAFlagIsMissing(t *testing.T) {
 	t.Setenv(config.EnvSentryToken, "")
 
 	// Everything but the Destino, so the terminal is there to be used for the one
-	// answer the command line did not carry; the empty line after it closes the list
-	// of Fontes, which the guided flow always offers to extend.
-	answers := "1\n\n"
+	// answer the command line did not carry; the two empty lines after it close the
+	// list of Fontes, which the guided flow always offers to extend, and decline the
+	// servidores MCP it always offers to add.
+	answers := "1\n\n\n"
 	args := append([]string{"--db", db}, endpointFlags(github, nil, linear)...)
 	args = append(args, "project", "add",
 		"--nome", "acme", "--repo", "acme/acme", "--branch", "main",
@@ -220,6 +221,7 @@ func TestGuidedProjectAddValidatesEachAnswerLiveBeforeAcceptingIt(t *testing.T) 
 		"acme", // organização do Sentry
 		"acme-web:web",
 		"", // encerra as Fontes
+		"", // nenhum servidor MCP
 	}, "\n") + "\n"
 
 	args := append([]string{"--db", db}, endpointFlags(github, sentry, linear)...)

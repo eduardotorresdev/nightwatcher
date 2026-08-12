@@ -104,7 +104,7 @@ func TestNoCommandEverPrintsACredential(t *testing.T) {
 
 	// The guided flow prints the most, and it is the one that asks questions about
 	// services it authenticated against.
-	answers := strings.Join([]string{"guiado", "acme/acme", "", "1", "acme-web:web", ""}, "\n") + "\n"
+	answers := strings.Join([]string{"guiado", "acme/acme", "", "1", "acme-web:web", "", ""}, "\n") + "\n"
 	guided := append(append([]string{"--db", db}, endpoints...), "project", "add", "--"+flagInteractive)
 	out, err := runCLI(t, answers, guided...)
 	if err != nil {

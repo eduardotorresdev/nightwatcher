@@ -73,6 +73,14 @@ type draft struct {
 	branch        string
 	linearProject string
 	sources       []domain.Source
+
+	// mcpServers are the servers the guided flow collected. There is no --mcp flag to
+	// fill this from a script, and deliberately not: a server needs a name, a URL, a
+	// header name, a prefix and a variable name, and cramming five fields into one
+	// repeatable string produces a flag nobody can type correctly and an error nobody
+	// can read. `nightwatcher mcp add --projeto <nome>` is the scripted path, and it
+	// is a complete one.
+	mcpServers []domain.MCPServer
 }
 
 func runProjectAdd(cmd *cobra.Command, args []string) error {
@@ -143,12 +151,27 @@ func runProjectAdd(cmd *cobra.Command, args []string) error {
 			return err
 		}
 
+		// After the Projeto and not with it: a server needs the Projeto's id, and the
+		// connectivity check already ran before any of this was written.
+		for _, m := range d.mcpServers {
+			m.ProjectID = saved.ID
+			stored, err := st.UpsertMCPServer(ctx, m, clock.Now())
+			if err != nil {
+				return err
+			}
+			saved.MCPServers = append(saved.MCPServers, stored)
+		}
+
 		fmt.Fprintf(out, "\nProjeto %s registrado.\n", saved.Name)
-		table(out, []string{"  CAMPO", "VALOR"}, [][]string{
+		rows := [][]string{
 			{"  repositório", saved.Repo + " @ " + saved.Branch},
 			{"  Destino (Linear)", saved.LinearProjectID},
 			{"  Fontes", fontesLine(saved.Sources)},
-		})
+		}
+		if len(saved.MCPServers) > 0 {
+			rows = append(rows, []string{"  Servidores MCP", mcpLine(saved.MCPServers)})
+		}
+		table(out, []string{"  CAMPO", "VALOR"}, rows)
 		return nil
 	})
 }
@@ -243,6 +266,12 @@ func (d *draft) guide(ctx context.Context, cmd *cobra.Command, r *remote, st *st
 		return err
 	}
 	d.sources = sources
+
+	servers, err := askMCPServers(ctx, cmd, p)
+	if err != nil {
+		return err
+	}
+	d.mcpServers = servers
 	return nil
 }
 
@@ -479,4 +508,119 @@ func runProjectList(cmd *cobra.Command, args []string) error {
 		table(out, []string{"PROJETO", "REPOSITÓRIO", "BRANCH", "LINEAR PROJECT", "FONTES"}, rows)
 		return nil
 	})
+}
+
+// mcpLine renders the servers for the confirmation table. The URL is enough: what
+// would identify the credential is a variable name, and `mcp list` is where that
+// belongs.
+func mcpLine(servers []domain.MCPServer) string {
+	parts := make([]string, 0, len(servers))
+	for _, m := range servers {
+		parts = append(parts, fmt.Sprintf("%s (%s)", m.Name, m.URL))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// askMCPServers is the optional tail of the guided flow. Answering nothing is the
+// normal path and the default: most Projetos are diagnosed from the repository alone,
+// which is what every Análise did before this existed.
+//
+// Each server is proved before it is accepted, the same as a repositório and a Fonte —
+// and with one more reason. A Fonte that does not exist stops the first webhook, loudly.
+// A servidor MCP that does not answer stops nothing: the Análise runs, the Diagnóstico
+// comes out, and it was written without the source the operator believed was there.
+func askMCPServers(ctx context.Context, cmd *cobra.Command, p *prompter) ([]domain.MCPServer, error) {
+	var out []domain.MCPServer
+	for {
+		label := "Servidor MCP: nome (vazio para nenhum)"
+		if len(out) > 0 {
+			label = "Outro servidor MCP: nome (vazio para terminar)"
+		}
+		name, err := p.ask(label, "")
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(name) == "" {
+			return out, nil
+		}
+
+		m := domain.MCPServer{
+			Name:      strings.ToLower(strings.TrimSpace(name)),
+			Transport: domain.MCPTransportHTTP,
+		}
+
+		answer, err := p.ask("  transporte (http ou sse)", "http")
+		if err != nil {
+			return nil, err
+		}
+		if m.Transport, err = domain.ParseMCPTransport(answer); err != nil {
+			return nil, err
+		}
+
+		url, err := p.askValid("  URL", "", func(v string) error {
+			candidate := m
+			candidate.URL = strings.TrimSpace(v)
+			return candidate.Validate()
+		})
+		if err != nil {
+			return nil, err
+		}
+		m.URL = strings.TrimSpace(url)
+
+		desc, err := p.ask("  para que serve (vai no prompt da sessão)", "")
+		if err != nil {
+			return nil, err
+		}
+		m.Description = strings.TrimSpace(desc)
+
+		headers, err := askMCPHeaders(p, m)
+		if err != nil {
+			return nil, err
+		}
+		m.Headers = headers
+
+		if err := checkMCP(ctx, cmd, m, false); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+}
+
+// askMCPHeaders collects the credential headers, asking for the VARIABLE and never for
+// the value. A prompt that asked for the token would put it in the operator's shell
+// history and one paste away from the database, which is the exact thing the schema
+// is built to prevent.
+func askMCPHeaders(p *prompter, m domain.MCPServer) ([]domain.MCPHeader, error) {
+	var out []domain.MCPHeader
+	for {
+		label := "  header de credencial: nome (vazio para nenhum)"
+		if len(out) > 0 {
+			label = "  outro header: nome (vazio para terminar)"
+		}
+		name, err := p.ask(label, "")
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(name) == "" {
+			return out, nil
+		}
+		h := domain.MCPHeader{Name: strings.TrimSpace(name)}
+
+		prefix, err := p.ask("    prefixo fixo (ex.: 'Bearer ' — o segredo NÃO vai aqui)", "Bearer ")
+		if err != nil {
+			return nil, err
+		}
+		h.Prefix = domain.NormalizeMCPPrefix(prefix)
+
+		env, err := p.askValid("    variável de ambiente que carrega o segredo", "", func(v string) error {
+			candidate := h
+			candidate.ValueEnv = strings.TrimSpace(v)
+			return candidate.Validate(m.Name)
+		})
+		if err != nil {
+			return nil, err
+		}
+		h.ValueEnv = strings.TrimSpace(env)
+		out = append(out, h)
+	}
 }

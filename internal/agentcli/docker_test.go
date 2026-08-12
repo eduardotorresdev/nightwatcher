@@ -169,3 +169,40 @@ func TestWritableMountsAreNotDuplicated(t *testing.T) {
 		t.Errorf("HOME é /tmp, esperava um único --tmpfs, veio %d: %v", n, args)
 	}
 }
+
+// The probe that decides whether an MCP server is usable runs in the Análise's own
+// perimeter, because the daemon and the ephemeral container sit on different networks
+// by design — and the credential it carries must not reach the argv any more than the
+// subscription token does.
+func TestSidecarRunsInTheAgentNetworkWithoutLeakingTheCredential(t *testing.T) {
+	o := DefaultDockerOptions()
+
+	args, clientEnv := o.SidecarCommand(NightwatcherBinary(),
+		[]string{"mcp", "probe", "--url", "https://mcp.exemplo/mcp"},
+		[]string{"NW_MCP_EXEMPLO"})
+
+	line := strings.Join(args, " ")
+	for _, want := range []string{
+		"--network nightwatcher-agent",
+		"--read-only",
+		"--cap-drop ALL",
+		"--security-opt no-new-privileges",
+		"--entrypoint " + NightwatcherBinary(),
+		"mcp probe",
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("argv não contém %q:\n%s", want, line)
+		}
+	}
+	// By name. `--env NW_MCP_EXEMPLO=valor` would put the credential where `ps` shows
+	// it to every account on the host.
+	if !strings.Contains(line, "--env NW_MCP_EXEMPLO ") {
+		t.Errorf("a variável não foi passada por nome:\n%s", line)
+	}
+	if strings.Contains(line, "NW_MCP_EXEMPLO=") {
+		t.Errorf("a variável foi passada com valor no argv:\n%s", line)
+	}
+	if clientEnv == nil {
+		t.Error("o ambiente do cliente docker veio nil")
+	}
+}

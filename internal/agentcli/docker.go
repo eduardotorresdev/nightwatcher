@@ -16,6 +16,16 @@ import (
 // and every container then dies at creation with "executable file not found in $PATH".
 const cliInstallDir = "/home/nightwatcher/.local/bin"
 
+// nightwatcherBinary is where the repository's Dockerfile puts the Go binary, and it
+// is the image's own ENTRYPOINT. SidecarCommand names it explicitly for the same
+// reason DockerOptions.Entrypoint exists: a `docker run` that does not say otherwise
+// gets the daemon, not the command it meant to run.
+const nightwatcherBinary = "/usr/local/bin/nightwatcher"
+
+// NightwatcherBinary is that path, for the caller that needs to run this binary inside
+// the Análise's perimeter.
+func NightwatcherBinary() string { return nightwatcherBinary }
+
 // containerTmp is always a tmpfs: the root filesystem is read-only and something has
 // to be writable besides HOME.
 const containerTmp = "/tmp"
@@ -248,4 +258,47 @@ func sortedKeys(m map[string]string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// SidecarCommand builds a `docker run` argv that runs some other binary inside the
+// SAME perimeter an Análise gets — above all the same network.
+//
+// It exists for one question that cannot be answered from the daemon's own process:
+// "can the Análise reach this host?". The daemon and the ephemeral container sit on
+// different networks by design — `nightwatcher-agent` restricts egress — so a probe
+// that succeeds from here proves nothing about there. Running the probe in the real
+// perimeter is the only honest answer, and this is the seam that allows it without
+// the word "docker" escaping this file.
+//
+// envNames are passed by NAME, never as `--env K=V`: /proc/<pid>/cmdline is
+// world-readable, and the whole point of the probe is that it carries a credential.
+func (o DockerOptions) SidecarCommand(entrypoint string, args, envNames []string) ([]string, map[string]string) {
+	d := o.withDefaults()
+
+	cmd := []string{
+		"run", "--rm",
+		"--user", d.User,
+		"--read-only",
+		"--cap-drop", "ALL",
+		"--security-opt", "no-new-privileges",
+		"--network", d.Network,
+		"--memory", d.Memory,
+		"--pids-limit", strconv.Itoa(d.PidsLimit),
+	}
+	for _, dir := range writableDirs(d.Home) {
+		cmd = append(cmd, "--tmpfs", dir+":rw,mode=1777,size="+d.TmpfsSize)
+	}
+	cmd = append(cmd, "--workdir", d.Home, "--env", "HOME="+d.Home)
+
+	clientEnv := map[string]string{}
+	for k, v := range d.ClientEnv {
+		clientEnv[k] = v
+	}
+	for _, name := range envNames {
+		cmd = append(cmd, "--env", name)
+	}
+
+	cmd = append(cmd, d.ExtraArgs...)
+	cmd = append(cmd, "--entrypoint", entrypoint, d.Image)
+	return append(cmd, args...), clientEnv
 }

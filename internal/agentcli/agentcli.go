@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,6 +67,22 @@ type Options struct {
 
 	// Clock is injectable so the breaker can be tested without waiting an hour.
 	Clock domain.Clock
+
+	// Env resolves the MCP credentials by variable name. It is injectable for the same
+	// reason the Clock is: a test must not depend on the machine's environment, and a
+	// test that sets one really does change the process it runs in.
+	Env func(string) string
+}
+
+// LookupEnv is where an MCP credential is read from. Note this is the DAEMON's
+// environment, deliberately: the child's is built from scratch and receives only what
+// the config references, so a variable that is not named by a server never reaches
+// the session.
+func (o Options) LookupEnv() func(string) string {
+	if o.Env != nil {
+		return o.Env
+	}
+	return os.Getenv
 }
 
 // Agent is the nightwatcher's domain.Agent.
@@ -108,10 +125,32 @@ func (a *Agent) Run(ctx context.Context, req domain.AgentRequest) (domain.AgentR
 	}
 
 	tools := effectiveTools(req)
-	s := newStream(tools)
+	args, err := buildArgs(req, tools, a.opts)
+	if err != nil {
+		// A server that cannot be rendered is a misconfiguration, not an outage: it
+		// will fail identically on every retry, so it goes down the no-retry path with
+		// the reason on the issue.
+		return domain.AgentResult{}, &domain.AgentError{
+			Kind:   domain.AgentErrPerimeter,
+			Detail: err.Error(),
+			Err:    err,
+		}
+	}
+	if missing := MissingMCPEnv(req.MCPServers, a.opts.LookupEnv()); len(missing) > 0 {
+		// An unset variable becomes an empty header, and an empty header comes back as
+		// a 401 that reads exactly like a revoked credential. Naming the variable here
+		// is the difference between a five-minute fix and an afternoon.
+		return domain.AgentResult{}, &domain.AgentError{
+			Kind: domain.AgentErrPerimeter,
+			Detail: "credencial de servidor MCP ausente do ambiente: " +
+				strings.Join(missing, ", "),
+		}
+	}
+
+	s := newStream(tools, req.MCPServers)
 	spec := Spec{
-		Args:    buildArgs(req, tools, a.opts),
-		Env:     buildEnv(a.opts),
+		Args:    args,
+		Env:     buildEnv(req, a.opts, a.opts.LookupEnv()),
 		WorkDir: req.WorkDir,
 		Stdin:   req.Prompt,
 		Timeout: timeoutFor(req),

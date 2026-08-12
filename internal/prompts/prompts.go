@@ -97,6 +97,12 @@ type Context struct {
 	// Recurrence describes the previous issue when this Ocorrência already produced
 	// one. Empty the first time round.
 	Recurrence string
+
+	// MCPServers are the remote MCP servers this session can consult. They reach the
+	// prompt because a model does not use a tool it does not know exists. Nothing
+	// here is secret — name, URL and what the server is for — and the credential is
+	// not part of the type at all.
+	MCPServers []domain.MCPServer
 }
 
 // view is what the templates actually see. Building it here instead of handing the
@@ -128,9 +134,33 @@ type view struct {
 	BasePriority  string
 	PriorityFacts []string
 
+	MCPServers []mcpView
+
 	BeginMarker string
 	EndMarker   string
 	Untrusted   string
+}
+
+// mcpView is one server as the template sees it. The headers are absent by
+// construction: what a template cannot reach, a template cannot print.
+type mcpView struct {
+	ToolPrefix  string
+	Name        string
+	URL         string
+	Description string
+}
+
+func mcpViews(servers []domain.MCPServer) []mcpView {
+	out := make([]mcpView, 0, len(servers))
+	for _, s := range servers {
+		out = append(out, mcpView{
+			ToolPrefix:  s.ToolPrefix(),
+			Name:        s.Name,
+			URL:         s.URL,
+			Description: strings.TrimSpace(s.Description),
+		})
+	}
+	return out
 }
 
 // Render produces the full prompt for one session. It is deterministic: the same
@@ -167,6 +197,7 @@ func Render(kind domain.SessionKind, occ domain.Occurrence, c Context) (string, 
 		Recurrence:    strings.TrimSpace(c.Recurrence),
 		BasePriority:  c.BasePriority.String(),
 		PriorityFacts: c.PriorityFacts,
+		MCPServers:    mcpViews(c.MCPServers),
 		BeginMarker:   begin,
 		EndMarker:     end,
 		Untrusted:     untrusted,

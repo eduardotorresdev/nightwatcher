@@ -6,6 +6,7 @@ está montado somente para leitura em `{{.WorkDir}}`, e a resposta tem que sair 
 como o código realmente é hoje — não de como um projeto parecido costuma ser.
 {{template "metadados" .}}
 {{template "ocorrencia" .}}
+{{- template "servidores_mcp" .}}
 ## Como estudar
 
 1. Encontre no repositório a parte do sistema que a sugestão toca. Cite arquivos e

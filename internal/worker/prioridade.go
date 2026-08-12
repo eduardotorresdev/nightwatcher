@@ -191,7 +191,7 @@ func rationale(res priority.Result, adj priority.Adjustment) string {
 }
 
 // render builds the prompt of one session.
-func (a *Analyst) render(kind domain.SessionKind, an domain.Analysis, proj domain.Project, src domain.Source, prior priorIssue, workDir string, base domain.Priority, facts []string) (string, error) {
+func (a *Analyst) render(kind domain.SessionKind, an domain.Analysis, proj domain.Project, src domain.Source, prior priorIssue, workDir string, base domain.Priority, facts []string, servers []domain.MCPServer) (string, error) {
 	message, stack := occurrenceText(an.Occurrence)
 	text, err := prompts.Render(kind, an.Occurrence, prompts.Context{
 		ProjectName:   proj.Name,
@@ -204,6 +204,9 @@ func (a *Analyst) render(kind domain.SessionKind, an domain.Analysis, proj domai
 		BasePriority:  base,
 		PriorityFacts: facts,
 		Recurrence:    prior.recurrence(),
+		// A model does not use a tool it does not know exists. Nothing here is a
+		// secret: name, URL and what the server is for.
+		MCPServers: servers,
 	})
 	if err != nil {
 		// Our own fault, not the model's — and repeating it produces the same result,

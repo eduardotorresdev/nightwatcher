@@ -24,6 +24,7 @@ mesma instalação:
 nightwatcher serve        # webhook do Sentry + worker de Análises
 nightwatcher config       # credenciais globais e números da operação
 nightwatcher project      # Projetos: repositório, Destino e Fontes Sentry
+nightwatcher mcp          # servidores MCP remotos, por Projeto ou globais
 nightwatcher analysis     # o que o sistema andou fazendo
 nightwatcher occurrence   # reprocessar e simular Ocorrências
 ```
@@ -69,6 +70,33 @@ export NIGHTWATCHER_DB=$PWD/nightwatcher.db
 
 O `project add` guiado valida ao vivo contra o GitHub, o Sentry e o Linear, então
 espera credenciais reais. `config validate` faz a mesma checagem isolada.
+
+## Servidores MCP
+
+O Diagnóstico e o Estudo podem consultar servidores MCP **remotos** (`http` ou
+`sse`) — documentação de biblioteca, esquema de um serviço, histórico de um
+board. `stdio` não é suportado: seria um processo rodando dentro do container da
+Análise, e o nightwatcher só lê.
+
+```
+./nightwatcher mcp add --nome ctx7 --url https://mcp.exemplo.com/mcp \
+    --header 'Authorization:Bearer :NW_MCP_CTX7'      # global
+./nightwatcher mcp add --projeto acme --nome board --url https://...  # só deste Projeto
+./nightwatcher mcp list
+./nightwatcher mcp rm --nome ctx7
+```
+
+A credencial nunca vai para o banco: o que fica gravado é o **nome** da variável
+de ambiente (`NW_MCP_CTX7`), e o valor precisa existir no ambiente do daemon
+(`dokku config:set`). O `mcp add` recusa gravar antes de provar que o servidor
+responde.
+
+**Egress.** A Análise roda em um container na rede `nightwatcher-agent`, cujo
+egress é restrito. Um MCP que responde da máquina de quem digitou o comando pode
+não ser alcançável de lá, então o `mcp add` roda o teste duas vezes — direto e de
+dentro dessa rede — e diz qual dos dois falhou. Liberar o host nessa rede é parte
+de configurar o MCP; sem isso a sessão sobe sem o servidor e diagnostica com
+menos contexto do que o operador acredita.
 
 ## Testes
 

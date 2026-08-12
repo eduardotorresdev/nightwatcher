@@ -10,6 +10,7 @@ não vale nada — a investigação continua comigo, que é o trabalho que este 
 existe para tirar de mim.
 {{template "metadados" .}}
 {{template "ocorrencia" .}}
+{{- template "servidores_mcp" .}}
 ## Como investigar
 
 1. Comece pelo culprit e pelo stack trace: procure no repositório os arquivos e

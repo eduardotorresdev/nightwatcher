@@ -5,9 +5,14 @@
 package domain
 
 import (
+	"errors"
 	"fmt"
+	"net/url"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Verdict is the outcome of the Triagem — the first judgement about an Ocorrência.
@@ -238,6 +243,11 @@ type Project struct {
 	Branch          string
 	LinearProjectID string
 	Sources         []Source
+
+	// MCPServers are this Projeto's own remote MCP servers. The global ones are NOT
+	// folded in here: the store answers what was configured, and MergeMCPServers is
+	// where the two become one universe, so a listing can still tell them apart.
+	MCPServers []MCPServer
 }
 
 // Source is a Sentry project feeding a Projeto. Its Label is a free-form tag that
@@ -300,4 +310,232 @@ type Analysis struct {
 
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+// MCPServer is a remote MCP server the long session may consult. Only remote: a
+// stdio server would be a process running inside the container, which is precisely
+// what the Diagnóstico does not do — "só lê, nunca executa" is structural here, not
+// merely intended.
+//
+// It carries NO credential. Headers name an environment variable, and the value is
+// read from the daemon's environment at invocation time, so the SQLite file stays
+// copyable without leaking one — the rule 0001_init.sql states for the whole schema.
+type MCPServer struct {
+	ID int64
+
+	// ProjectID is 0 for a global server, which applies to every Projeto. A Projeto's
+	// own server of the same Name wins over the global one.
+	ProjectID int64
+
+	// Name forms the mcp__<Name>__ prefix of every tool the server exposes, which is
+	// why it is narrower than a free-form label.
+	Name string
+
+	Transport MCPTransport
+	URL       string
+
+	// Description is what the session is told the server is for. A model does not use
+	// a tool it does not know exists, so this reaches the prompt.
+	Description string
+
+	Headers []MCPHeader
+}
+
+// MCPHeader is one HTTP header sent to the server. ValueEnv is the NAME of an
+// environment variable, never the value: what goes to the server is
+// Prefix + os.Getenv(ValueEnv).
+type MCPHeader struct {
+	Name string
+
+	// Prefix is fixed text in front of the secret — "Bearer " for the overwhelmingly
+	// common case. It is stored, so it must never be the credential itself.
+	Prefix string
+
+	ValueEnv string
+}
+
+// MCPTransport is the remote transport. stdio is deliberately absent and has no
+// constant here: a value that cannot be spelled cannot be configured by accident.
+type MCPTransport string
+
+const (
+	MCPTransportHTTP MCPTransport = "http"
+	MCPTransportSSE  MCPTransport = "sse"
+)
+
+// ParseMCPTransport accepts what an operator types, and nothing else. `stdio` gets an
+// error that says why rather than "unknown", because it is the one wrong answer
+// somebody will reasonably try.
+func ParseMCPTransport(s string) (MCPTransport, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "http":
+		return MCPTransportHTTP, nil
+	case "sse":
+		return MCPTransportSSE, nil
+	case "stdio":
+		return "", errors.New("transporte stdio não é suportado: ele seria um processo executando dentro do container da Análise, e o nightwatcher só lê")
+	}
+	return "", fmt.Errorf("transporte MCP desconhecido: %q; use http ou sse", s)
+}
+
+// mcpNamePattern is what a server name may be. It is narrow because the name becomes
+// the prefix of a tool name (mcp__<name>__…), and a character the CLI does not accept
+// there would fail at the init event of every Análise instead of here.
+var mcpNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+
+// mcpEnvPattern is the shape of an environment variable name, so a typo fails at
+// `mcp add` rather than as an empty header at the first Diagnóstico.
+var mcpEnvPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
+
+// Validate refuses a server that could not work, and it lives here because three
+// callers need the same answer: the CLI before writing, the store before persisting,
+// and agentcli before invoking.
+func (m MCPServer) Validate() error {
+	if !mcpNamePattern.MatchString(m.Name) {
+		return fmt.Errorf("nome de servidor MCP %q inválido: use minúsculas, dígitos, - e _, começando por letra ou dígito — ele vira o prefixo mcp__%s__ das ferramentas", m.Name, m.Name)
+	}
+	switch m.Transport {
+	case MCPTransportHTTP, MCPTransportSSE:
+	default:
+		return fmt.Errorf("servidor MCP %s: transporte %q inválido; use http ou sse", m.Name, m.Transport)
+	}
+	u, err := url.Parse(strings.TrimSpace(m.URL))
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("servidor MCP %s: URL %q inválida", m.Name, m.URL)
+	}
+	switch u.Scheme {
+	case "https":
+	case "http":
+		// Plain http is accepted only for a loopback host, and even then the Análise
+		// will not reach it: its container has its own network namespace, so localhost
+		// in there is the container itself. Saying so here beats a timeout later.
+		if !isLoopback(u.Hostname()) {
+			return fmt.Errorf("servidor MCP %s: URL precisa ser https (http só é aceito para localhost, que o container da Análise não alcança)", m.Name)
+		}
+	default:
+		return fmt.Errorf("servidor MCP %s: esquema %q não é suportado; use https", m.Name, u.Scheme)
+	}
+	seen := make(map[string]bool, len(m.Headers))
+	for _, h := range m.Headers {
+		if err := h.Validate(m.Name); err != nil {
+			return err
+		}
+		key := strings.ToLower(h.Name)
+		if seen[key] {
+			return fmt.Errorf("servidor MCP %s: header %s declarado duas vezes", m.Name, h.Name)
+		}
+		seen[key] = true
+	}
+	return nil
+}
+
+// ToolPrefix is how a tool of this server is named in the session.
+func (m MCPServer) ToolPrefix() string { return "mcp__" + m.Name }
+
+// Host is what has to be reachable from the Análise's network, port included, so the
+// failure message can name it.
+func (m MCPServer) Host() string {
+	u, err := url.Parse(strings.TrimSpace(m.URL))
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	if u.Port() != "" {
+		return u.Host
+	}
+	if u.Scheme == "http" {
+		return u.Host + ":80"
+	}
+	return u.Host + ":443"
+}
+
+// mcpSecretHints are the words that betray a credential pasted where only fixed text
+// belongs. The same list guards `config set`, and for the same reason: the database
+// has to stay copyable without leaking one.
+var mcpSecretHints = []string{"token", "secret", "key", "password", "senha", "credential", "credencial", "bearer "}
+
+func (h MCPHeader) Validate(server string) error {
+	if strings.TrimSpace(h.Name) == "" || strings.ContainsAny(h.Name, " \t\r\n:") {
+		return fmt.Errorf("servidor MCP %s: nome de header %q inválido", server, h.Name)
+	}
+	if !mcpEnvPattern.MatchString(h.ValueEnv) {
+		return fmt.Errorf("servidor MCP %s: header %s precisa apontar para uma variável de ambiente (ex.: NW_MCP_%s), veio %q", server, h.Name, strings.ToUpper(server), h.ValueEnv)
+	}
+	// The prefix is stored, so it may be "Bearer " and it may not be the token that
+	// follows it. Long or secret-looking text here is somebody pasting the credential
+	// into the wrong half of the flag, and that lands in SQLite forever.
+	trimmed := strings.TrimSpace(h.Prefix)
+	if len(trimmed) > 16 {
+		return fmt.Errorf("servidor MCP %s: o prefixo do header %s tem %d caracteres; ele é texto fixo (ex.: \"Bearer \"), o segredo vai na variável %s", server, h.Name, len(trimmed), h.ValueEnv)
+	}
+	lower := strings.ToLower(trimmed)
+	for _, hint := range mcpSecretHints {
+		// "Bearer " alone is the legitimate prefix; "Bearer sk-…" is the mistake. The
+		// hint list is consulted against what remains after the scheme word.
+		if hint == "bearer " {
+			continue
+		}
+		if strings.Contains(lower, hint) {
+			return fmt.Errorf("servidor MCP %s: o prefixo do header %s parece uma credencial; ela vai na variável de ambiente %s, nunca no banco", server, h.Name, h.ValueEnv)
+		}
+	}
+	return nil
+}
+
+// Value is what the header carries on the wire, given the process environment.
+func (h MCPHeader) Value(lookup func(string) string) string {
+	return h.Prefix + lookup(h.ValueEnv)
+}
+
+// NormalizeMCPPrefix puts back the space an authentication scheme needs and that
+// everything between the operator and here wants to eat.
+//
+// `Bearer ` ends in a space that belongs to the value, and losing it produces
+// `Bearersk-…` on the wire — a 401 that reads exactly like a revoked credential and
+// is invisible in every listing, because the prefix prints identically either way.
+// The guided flow trims every answer it reads, and a flag typed as
+// `Authorization:Bearer:NW_X` looks right to whoever typed it.
+//
+// A prefix that is all letters is a scheme word and gets its space. Anything ending in
+// punctuation — `token=`, `v1:` — was written deliberately and is left alone.
+func NormalizeMCPPrefix(prefix string) string {
+	if strings.TrimSpace(prefix) == "" {
+		return ""
+	}
+	if strings.HasSuffix(prefix, " ") {
+		return prefix
+	}
+	for _, r := range prefix {
+		if !unicode.IsLetter(r) {
+			return prefix
+		}
+	}
+	return prefix + " "
+}
+
+// MergeMCPServers folds the global servers with a Projeto's own. The Projeto wins on a
+// name collision, because a global default a Projeto cannot override is not a default.
+// The order is stable so the invocation, the prompt and the perimeter all agree.
+func MergeMCPServers(global, own []MCPServer) []MCPServer {
+	byName := make(map[string]MCPServer, len(global)+len(own))
+	var order []string
+	for _, s := range append(append([]MCPServer{}, global...), own...) {
+		if _, seen := byName[s.Name]; !seen {
+			order = append(order, s.Name)
+		}
+		byName[s.Name] = s
+	}
+	sort.Strings(order)
+	out := make([]MCPServer, 0, len(order))
+	for _, n := range order {
+		out = append(out, byName[n])
+	}
+	return out
+}
+
+func isLoopback(host string) bool {
+	switch host {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
 }

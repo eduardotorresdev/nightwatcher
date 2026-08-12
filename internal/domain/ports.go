@@ -44,6 +44,15 @@ type AgentRequest struct {
 	// Tools is the universe of tools the session may use. This is hygiene, not a
 	// security boundary: the containment is the container.
 	Tools []string
+
+	// MCPServers are the remote MCP servers this session may consult. Empty is the
+	// normal case and the only one the Triagem ever has: a session with no repository
+	// and one turn has nothing to ask a server about.
+	//
+	// They are NOT part of Tools, and that is not a tidiness choice: the CLI's --tools
+	// flag governs only the built-in set, so an MCP tool listed there would be ignored.
+	// What authorises them is a separate flag, and agentcli is where that lives.
+	MCPServers []MCPServer
 }
 
 // AgentResult is what a session produced.
@@ -52,6 +61,12 @@ type AgentResult struct {
 	Duration time.Duration
 	CostUSD  float64
 	NumTurns int
+
+	// MCPUnavailable names servers the session declared and that did not come up. It
+	// is not a failure — less capability never is — but it has to leave this package,
+	// because an answer written without a server the operator believed was there
+	// looks exactly like one written with it.
+	MCPUnavailable []string
 }
 
 // AgentErrorKind classifies a failed session, because the failure issue has to show

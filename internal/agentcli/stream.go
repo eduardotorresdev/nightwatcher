@@ -6,11 +6,34 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/eduardotorresdev/nightwatcher/internal/domain"
 )
+
+// mcpToolServer splits mcp__<servidor>__<ferramenta> into the server that owns it. It
+// reports false for anything that is not an MCP tool name.
+func mcpToolServer(tool string) (string, bool) {
+	rest, ok := strings.CutPrefix(tool, "mcp__")
+	if !ok {
+		return "", false
+	}
+	if server, _, found := strings.Cut(rest, "__"); found {
+		return server, true
+	}
+	// `mcp__servidor` with no tool suffix is how a whole server is named; it is a
+	// legitimate shape and resolves to itself.
+	return rest, rest != ""
+}
+
+// quoted keeps a server name written by somebody else visible as data. The name comes
+// out of a .mcp.json in the cloned repository in exactly the case this matters, and
+// it lands in an error that is read on a terminal and written onto an issue.
+func quoted(s string) string {
+	return fmt.Sprintf("%q", s)
+}
 
 // The session is read as `stream-json` rather than `json` for one reason: the
 // system/api_retry event is the only place where a usage limit shows up as a closed
@@ -27,13 +50,21 @@ type envelopeType struct {
 // leaking into a session that is about to read untrusted text.
 type initEvent struct {
 	Tools          []string          `json:"tools"`
-	MCPServers     []json.RawMessage `json:"mcp_servers"`
+	MCPServers     []mcpServerStatus `json:"mcp_servers"`
 	Plugins        []json.RawMessage `json:"plugins"`
 	SlashCommands  []json.RawMessage `json:"slash_commands"`
 	PermissionMode string            `json:"permissionMode"`
 	APIKeySource   string            `json:"apiKeySource"`
 	Model          string            `json:"model"`
 	CWD            string            `json:"cwd"`
+}
+
+// mcpServerStatus is one entry of the init event's mcp_servers. The name is what the
+// perimeter compares against; the status is what says whether a server we asked for
+// actually came up.
+type mcpServerStatus struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
 }
 
 // retryEvent precedes every API retry. Its `error` field is a documented closed enum
@@ -76,6 +107,17 @@ func (r *resultEvent) text() string {
 type stream struct {
 	expected map[string]bool
 
+	// expectedMCP is the set of servers this session declared. The perimeter used to
+	// be the number zero; it is now this list, and the defence it carries is the same
+	// one: the cloned repository can ship its own .mcp.json, which is content nobody
+	// here controls.
+	expectedMCP map[string]bool
+
+	// absentMCP names servers that were declared and did not come up. Not a violation
+	// — see checkPerimeter — but the caller logs it, because a Diagnóstico written
+	// without a server the operator believed was there is wrong in a way nobody sees.
+	absentMCP []string
+
 	init    *initEvent
 	retries []retryEvent
 	result  *resultEvent
@@ -89,10 +131,16 @@ type stream struct {
 	perimeter error
 }
 
-func newStream(expectedTools []string) *stream {
-	s := &stream{expected: make(map[string]bool, len(expectedTools))}
+func newStream(expectedTools []string, expectedMCP []domain.MCPServer) *stream {
+	s := &stream{
+		expected:    make(map[string]bool, len(expectedTools)),
+		expectedMCP: make(map[string]bool, len(expectedMCP)),
+	}
 	for _, t := range expectedTools {
 		s.expected[strings.TrimSpace(t)] = true
+	}
+	for _, m := range expectedMCP {
+		s.expectedMCP[m.Name] = true
 	}
 	return s
 }
@@ -166,11 +214,38 @@ func (s *stream) checkPerimeter(ev *initEvent) error {
 		if t == "EndConversation" {
 			continue
 		}
+		// A tool belonging to a server this session declared is expected, and it is
+		// matched by its server rather than by its own name: the tools a remote server
+		// exposes are decided on the server and change without asking us, so
+		// enumerating them here would turn the server adding one into a failed
+		// Análise. What is bounded is which SERVER may be reached.
+		if server, ok := mcpToolServer(t); ok {
+			if !s.expectedMCP[server] {
+				bad = append(bad, "ferramenta de servidor MCP não declarado: "+t)
+			}
+			continue
+		}
 		bad = append(bad, "ferramenta fora do combinado: "+t)
 	}
-	if n := len(ev.MCPServers); n > 0 {
-		bad = append(bad, fmt.Sprintf("%d servidor(es) MCP carregado(s)", n))
+	seenMCP := make(map[string]bool, len(ev.MCPServers))
+	for _, m := range ev.MCPServers {
+		name := strings.TrimSpace(m.Name)
+		seenMCP[name] = true
+		if !s.expectedMCP[name] {
+			// This is the .mcp.json of the clone arriving, and it is why the check is
+			// a gate on the init event and not a post-mortem: the session is killed
+			// before the untrusted text is ever answered.
+			bad = append(bad, "servidor MCP não declarado: "+quoted(name))
+		}
 	}
+	// Declared and did not come up: less capability, never leakage, so the same
+	// asymmetry that governs tools governs this — it is reported, not fatal.
+	for name := range s.expectedMCP {
+		if !seenMCP[name] {
+			s.absentMCP = append(s.absentMCP, name)
+		}
+	}
+	sort.Strings(s.absentMCP)
 	if n := len(ev.Plugins); n > 0 {
 		bad = append(bad, fmt.Sprintf("%d plugin(s) carregado(s)", n))
 	}
@@ -274,6 +349,10 @@ func interpret(out Outcome, s *stream) (domain.AgentResult, error) {
 		Duration: out.Duration,
 		CostUSD:  s.result.TotalCostUSD,
 		NumTurns: s.result.NumTurns,
+		// Carried out rather than swallowed: a Diagnóstico written without a server
+		// the operator believed was there is wrong in a way nobody can see from the
+		// answer alone.
+		MCPUnavailable: s.absentMCP,
 	}, nil
 }
 

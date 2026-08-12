@@ -41,6 +41,15 @@ type history interface {
 	ListAnalyses(ctx context.Context, f store.AnalysisFilter) ([]domain.Analysis, error)
 }
 
+// mcpCatalog is the other optional half of the Journal: the MCP servers that apply to
+// every Projeto. It is separate for the same reason `history` is — *store.Store
+// satisfies it for free, and NopJournal deliberately does not. A simulation runs with
+// exactly the servers it was handed on the Projeto, and inventing global ones for it
+// would mean `occurrence simulate` reaching services the operator did not name.
+type mcpCatalog interface {
+	GlobalMCPServers(ctx context.Context) ([]domain.MCPServer, error)
+}
+
 // historyLookback bounds the scan for the previous issue of an Ocorrência. The store
 // has no "which issue did this Sentry group produce" query, so the reincidência path
 // reads the Projeto's recent Análises and matches on the Sentry group id. Past this
@@ -94,6 +103,7 @@ type AnalystDeps struct {
 type Analyst struct {
 	journal   Journal
 	history   history
+	catalog   mcpCatalog
 	agent     domain.Agent
 	tracker   domain.Tracker
 	workspace domain.Workspace
@@ -146,7 +156,27 @@ func NewAnalyst(d AnalystDeps) (*Analyst, error) {
 		a.tun.MaxAttempts = def.MaxAttempts
 	}
 	a.history, _ = d.Journal.(history)
+	a.catalog, _ = d.Journal.(mcpCatalog)
 	return a, nil
+}
+
+// mcpServers is the server universe of one Projeto's long session: the global ones
+// folded with the Projeto's own, the Projeto winning a name collision.
+//
+// A failure to read the globals does NOT fail the Análise. Losing a server costs
+// capability, and a Diagnóstico written from the repository alone is the behaviour of
+// every Análise before this existed — while refusing to analyse because a SELECT
+// failed would turn a degraded database into an unanalysed issue.
+func (a *Analyst) mcpServers(ctx context.Context, p domain.Project) []domain.MCPServer {
+	var global []domain.MCPServer
+	if a.catalog != nil {
+		var err error
+		if global, err = a.catalog.GlobalMCPServers(ctx); err != nil {
+			a.log.Error("could not read the global MCP servers", "projeto", p.Name, "error", err)
+			global = nil
+		}
+	}
+	return domain.MergeMCPServers(global, p.MCPServers)
 }
 
 // timeoutGrace is how long past its own ceiling a session is allowed to be before
@@ -262,11 +292,14 @@ func (a *Analyst) Analyse(ctx context.Context, an domain.Analysis) (domain.Analy
 		return an, err
 	}
 
-	prompt, err := a.render(domain.SessionTriage, an, proj, src, prior, "", domain.PriorityNone, nil)
+	prompt, err := a.render(domain.SessionTriage, an, proj, src, prior, "", domain.PriorityNone, nil, nil)
 	if err != nil {
 		return a.failure(ctx, an, proj, src, prior, err)
 	}
-	reply, err := a.session(ctx, an, domain.SessionTriage, prompt, "", a.tun.TriageTimeout, []string{})
+	// No tools and no MCP server: a Triagem is one turn over text, with no repository
+	// and nothing to ask a server about. Both empties are the contract, not an
+	// omission.
+	reply, err := a.session(ctx, an, domain.SessionTriage, prompt, "", a.tun.TriageTimeout, []string{}, nil)
 	if err != nil {
 		return a.failure(ctx, an, proj, src, prior, err)
 	}
@@ -322,11 +355,12 @@ func (a *Analyst) Analyse(ctx context.Context, an domain.Analysis) (domain.Analy
 	if a.sessionIn != "" {
 		sessionDir = a.sessionIn
 	}
-	prompt, err = a.render(kind, an, proj, src, prior, sessionDir, base.Priority, factLines(facts))
+	servers := a.mcpServers(ctx, proj)
+	prompt, err = a.render(kind, an, proj, src, prior, sessionDir, base.Priority, factLines(facts), servers)
 	if err != nil {
 		return a.failure(ctx, an, proj, src, prior, err)
 	}
-	reply, err = a.session(ctx, an, kind, prompt, dir, a.tun.DeepTimeout, agentcli.DeepTools)
+	reply, err = a.session(ctx, an, kind, prompt, dir, a.tun.DeepTimeout, agentcli.DeepTools, servers)
 	if err != nil {
 		return a.failure(ctx, an, proj, src, prior, err)
 	}
@@ -362,19 +396,27 @@ func finished(an domain.Analysis) bool {
 // session runs one Claude session and records it — prompt and response both, because
 // that is what `analysis show` prints and the raw material for diagnosing a bad
 // Triagem. A session that failed is recorded too: the reason is half the evidence.
-func (a *Analyst) session(ctx context.Context, an domain.Analysis, kind domain.SessionKind, prompt, workDir string, timeout time.Duration, tools []string) (string, error) {
+func (a *Analyst) session(ctx context.Context, an domain.Analysis, kind domain.SessionKind, prompt, workDir string, timeout time.Duration, tools []string, servers []domain.MCPServer) (string, error) {
 	started := a.clock.Now()
 
 	guard := a.guardSession(ctx, timeout+timeoutGrace)
 	defer guard.release()
 
 	res, err := a.agent.Run(guard.ctx, domain.AgentRequest{
-		Kind:    kind,
-		Prompt:  prompt,
-		WorkDir: workDir,
-		Timeout: timeout,
-		Tools:   tools,
+		Kind:       kind,
+		Prompt:     prompt,
+		WorkDir:    workDir,
+		Timeout:    timeout,
+		Tools:      tools,
+		MCPServers: servers,
 	})
+	// Declared and did not come up. Not a failure — the session answered — but the
+	// answer was written without a source the prompt told it about, and that is
+	// invisible in the text.
+	if len(res.MCPUnavailable) > 0 {
+		a.log.Warn("servidor MCP declarado não subiu na sessão",
+			"analise", an.ID, "sessao", string(kind), "servidores", strings.Join(res.MCPUnavailable, ", "))
+	}
 
 	sess := domain.Session{
 		Kind:      kind,

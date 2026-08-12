@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1430,5 +1431,57 @@ func TestAnAnalysisGivenUpOnStillPublishesLinkedToTheIssueTheGroupAlreadyHas(t *
 	}
 	if got := h.analysis(t, failed.ID); got.IssueID == "" {
 		t.Error("a Análise precisa apontar para a issue que a registrou")
+	}
+}
+
+// A Triagem é uma sessão de um turno, sem clone e sem ferramenta: nenhum servidor MCP
+// chega até ela. O Diagnóstico recebe a fusão — os globais mais os do Projeto, com o
+// Projeto ganhando quando os dois nomeiam o mesmo servidor.
+func TestOnlyTheLongSessionReceivesTheMCPServersMergedProjectFirst(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	for _, m := range []domain.MCPServer{
+		{Name: "docs", Transport: domain.MCPTransportHTTP, URL: "https://global.exemplo.com/mcp"},
+		{Name: "board", Transport: domain.MCPTransportHTTP, URL: "https://board.exemplo.com/mcp"},
+		{ProjectID: h.proj.ID, Name: "docs", Transport: domain.MCPTransportHTTP, URL: "https://acme.exemplo.com/mcp"},
+	} {
+		if _, err := h.store.UpsertMCPServer(ctx, m, t0); err != nil {
+			t.Fatalf("UpsertMCPServer(%s): %v", m.Name, err)
+		}
+	}
+
+	h.agent.triage = []reply{triageReply(domain.VerdictDefect)}
+	h.agent.deep = []reply{diagnosisReply(realPath, "manter", "")}
+
+	enqueue(t, h.store, h.proj, occurrenceFrom(t, "defeito-error-new.json"))
+	if n := h.drain(t); n != 1 {
+		t.Fatalf("análises concluídas = %d, quero 1", n)
+	}
+
+	reqs := h.agent.requests()
+	if len(reqs) != 2 {
+		t.Fatalf("sessões = %d, quero 2 (triagem e diagnóstico)", len(reqs))
+	}
+
+	triage, deep := reqs[0], reqs[1]
+	if triage.Kind != domain.SessionTriage {
+		t.Fatalf("a primeira sessão foi %q, quero a Triagem", triage.Kind)
+	}
+	if len(triage.MCPServers) != 0 {
+		t.Errorf("a Triagem recebeu %d servidor(es) MCP, quero nenhum: %v", len(triage.MCPServers), triage.MCPServers)
+	}
+
+	got := map[string]string{}
+	for _, m := range deep.MCPServers {
+		got[m.Name] = m.URL
+	}
+	want := map[string]string{
+		"board": "https://board.exemplo.com/mcp",
+		// o global de mesmo nome perdeu para o do Projeto
+		"docs": "https://acme.exemplo.com/mcp",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("servidores do Diagnóstico = %v, quero %v", got, want)
 	}
 }

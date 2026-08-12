@@ -141,6 +141,20 @@ func (s *Store) ListProjects(ctx context.Context) ([]domain.Project, error) {
 	if err := srcRows.Err(); err != nil {
 		return nil, fmt.Errorf("listando fontes: %w", err)
 	}
+
+	// A third round trip, for the same reason as the second: one query for every
+	// Projeto's servers rather than one query per Projeto. The global servers are NOT
+	// folded in here — `project list` has to be able to show what this Projeto itself
+	// declared.
+	servers, err := s.mcpServers(ctx, `WHERE project_id IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	for projectID, list := range servers {
+		if i, ok := byID[projectID]; ok {
+			out[i].MCPServers = list
+		}
+	}
 	return out, nil
 }
 
@@ -171,6 +185,12 @@ func (s *Store) project(ctx context.Context, where string, arg any) (domain.Proj
 		return domain.Project{}, err
 	}
 	p.Sources = sources
+
+	servers, err := s.mcpServersOf(ctx, p.ID)
+	if err != nil {
+		return domain.Project{}, err
+	}
+	p.MCPServers = servers
 	return p, nil
 }
 

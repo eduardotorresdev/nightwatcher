@@ -70,6 +70,23 @@ Também lê o código, mas responde outra pergunta: se dá para fazer, por quais
 caminhos, e a que custo. Entrega viabilidade, três alternativas com uma
 recomendada, riscos e dificuldades previstas.
 
+### Servidor MCP
+Uma fonte de conhecimento fora do repositório que o Diagnóstico e o Estudo podem
+consultar: documentação de biblioteca, esquema de um serviço, histórico de um
+board. Configurado por Projeto ou globalmente — o global vale para todos, o do
+Projeto soma e ganha em colisão de nome.
+
+Só **remoto** (`http` ou `sse`). `stdio` está fora e permanece fora: seria um
+processo executando dentro do container da Análise, que é exatamente o que a
+regra "só lê, nunca executa" proíbe.
+
+A Triagem nunca fala com um servidor MCP: é uma sessão de um turno, sem clone e
+sem ferramenta.
+
+A credencial **nunca** entra no banco. O que fica gravado é o *nome* de uma
+variável de ambiente; o valor vem do ambiente do daemon e entra no container por
+nome, nunca em argv.
+
 ### Prioridade
 A urgência com que uma issue nasce no Destino. Não é opinião: parte de fatos
 mensuráveis da Ocorrência (quantas pessoas atingiu, com que frequência, em qual
