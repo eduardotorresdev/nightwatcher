@@ -1,0 +1,54 @@
+# Os binários publicados servem para compilar, testar e rodar uma instância local.
+# Não operam uma instância remota: todo subcomando abre direto o SQLite do daemon.
+version: 2
+
+project_name: nightwatcher
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: nightwatcher
+    main: ./cmd/nightwatcher
+    binary: nightwatcher
+    # modernc.org/sqlite é Go puro, então o binário sai estático e não precisa de
+    # toolchain C em lugar nenhum — é a mesma escolha que o Dockerfile faz.
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/eduardotorresdev/nightwatcher/internal/cli.Version={{ .Version }}
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+
+archives:
+  - formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+      - LICENSE
+      - CONTEXT.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - Merge pull request
+
+release:
+  # Explícito porque o remote `origin` não é o único deste repositório: o `dokku`
+  # também está aqui, e o GoReleaser não tem como adivinhar qual é o do GitHub.
+  github:
+    owner: eduardotorresdev
+    name: nightwatcher
+  draft: false
+  prerelease: auto

@@ -1,0 +1,7 @@
+.git
+dist
+out
+*.db
+*.db-wal
+*.db-shm
+.env

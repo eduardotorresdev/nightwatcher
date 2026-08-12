@@ -1,0 +1,68 @@
+# CI só: nada aqui faz deploy. O deploy continua sendo `git push dokku`, feito à mão,
+# e nenhum segredo de produção vive neste repositório.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # go.mod é a fonte única da versão do Go. O Dockerfile fixa a sua própria e mais
+      # nova; as duas são compatíveis porque a diretiva do módulo é um piso.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "arquivos fora do gofmt:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # -race exige cgo, que o runner tem. O CGO_ENABLED=0 do Dockerfile e do
+      # GoReleaser vale para o binário distribuído, não para os testes.
+      - name: go test
+        run: go test -race ./...
+
+      - name: go build
+        run: go build ./...
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Só o estágio de build. O estágio de runtime instala o Claude CLI baixando de
+      # claude.ai, e uma indisponibilidade lá fora não pode derrubar um PR daqui.
+      - name: docker build (estágio de compilação)
+        run: docker build --target build .
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # O repositório é público: um token do Sentry ou do Linear que escape num commit
+      # futuro tem que falhar aqui, não ser descoberto por terceiros.
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

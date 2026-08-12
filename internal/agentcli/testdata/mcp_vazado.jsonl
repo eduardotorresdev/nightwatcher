@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"ee55","cwd":"/workspace","tools":["Glob","Grep","Read","Bash","mcp__loja__pedidos"],"mcp_servers":[{"name":"loja","status":"connected"}],"slash_commands":[],"plugins":[],"permissionMode":"dontAsk","model":"claude-opus-5[1m]","apiKeySource":"none"}
+{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","api_error_status":null,"result":"{\"desfecho\":\"ruído\"}","session_id":"ee55","num_turns":1,"total_cost_usd":0.01}

@@ -1,0 +1,1 @@
+{"type":"result","subtype":"success","is_error":true,"terminal_reason":"api_error","api_error_status":401,"result":"Failed to authenticate. API Error: 401 OAuth access token is invalid.","session_id":"jj10","num_turns":0,"total_cost_usd":0,"modelUsage":{}}

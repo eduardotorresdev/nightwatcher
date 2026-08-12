@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"gg77","cwd":"/workspace","tools":["Glob","Grep","Read"],"mcp_servers":[],"slash_commands":[],"plugins":[],"permissionMode":"dontAsk","model":"claude-opus-5[1m]","apiKeySource":"none"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","tex

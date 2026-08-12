@@ -1,0 +1,7 @@
+{
+  "name": "acme-fixture",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Recorte de fixture do acme: os caminhos casam com os stack traces reais gravados em testdata/sentry/."
+}
