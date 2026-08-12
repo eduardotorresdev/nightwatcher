@@ -18,7 +18,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # go.mod é a fonte única da versão do Go. O Dockerfile fixa a sua própria e mais
       # nova; as duas são compatíveis porque a diretiva do módulo é um piso.
@@ -48,7 +48,7 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Só o estágio de build. O estágio de runtime instala o Claude CLI baixando de
       # claude.ai, e uma indisponibilidade lá fora não pode derrubar um PR daqui.
@@ -58,7 +58,7 @@ jobs:
   secrets:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       # O repositório é público: um token do Sentry ou do Linear que escape num commit
