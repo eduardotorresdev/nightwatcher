@@ -63,6 +63,6 @@ jobs:
           fetch-depth: 0
       # O repositório é público: um token do Sentry ou do Linear que escape num commit
       # futuro tem que falhar aqui, não ser descoberto por terceiros.
-      - uses: gitleaks/gitleaks-action@v2
+      - uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
